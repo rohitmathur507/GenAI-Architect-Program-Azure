@@ -1,0 +1,10 @@
+langchain
+langchain-openai
+langchain-core
+langchain-community
+pydantic
+python-dotenv
+yfinance
+mlflow
+requests
+streamlit
