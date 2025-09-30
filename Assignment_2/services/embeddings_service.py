@@ -1,7 +1,3 @@
-"""
-Embedding generation service
-"""
-
 import asyncio
 from typing import List
 import numpy as np

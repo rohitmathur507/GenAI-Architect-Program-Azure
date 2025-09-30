@@ -1,7 +1,3 @@
-"""
-Azure OpenAI client management
-"""
-
 from openai import AsyncAzureOpenAI
 from config import config
 from typing import Optional

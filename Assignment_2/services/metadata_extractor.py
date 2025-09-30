@@ -1,7 +1,3 @@
-"""
-LLM-based metadata extraction service
-"""
-
 import asyncio
 from typing import Dict, List
 from tqdm.asyncio import tqdm

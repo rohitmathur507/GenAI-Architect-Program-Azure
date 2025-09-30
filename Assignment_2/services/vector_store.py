@@ -1,7 +1,3 @@
-"""
-Vector store operations using FAISS
-"""
-
 import pickle
 import hashlib
 from pathlib import Path

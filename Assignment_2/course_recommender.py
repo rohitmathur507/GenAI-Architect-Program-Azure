@@ -1,7 +1,3 @@
-"""
-Main CourseRecommender class - orchestrates all services
-"""
-
 from typing import List, Tuple
 import pandas as pd
 from tqdm.asyncio import tqdm

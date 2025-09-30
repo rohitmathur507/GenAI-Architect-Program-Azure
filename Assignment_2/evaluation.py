@@ -1,7 +1,3 @@
-"""
-Evaluation and testing script for Course Recommender
-"""
-
 import asyncio
 import sys
 

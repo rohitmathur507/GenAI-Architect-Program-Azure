@@ -1,7 +1,3 @@
-"""
-Configuration management for Course Recommender
-"""
-
 import os
 from pathlib import Path
 from typing import Dict, Any
