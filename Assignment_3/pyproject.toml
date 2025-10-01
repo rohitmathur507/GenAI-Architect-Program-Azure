@@ -1,0 +1,14 @@
+[project]
+name = "assignment-3"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "azure-ai-inference>=1.0.0b9",
+    "langchain-openai>=0.3.33",
+    "langgraph>=0.6.8",
+    "mlflow>=3.4.0",
+    "pinecone>=7.3.0",
+    "pydantic>=2.11.9",
+]
