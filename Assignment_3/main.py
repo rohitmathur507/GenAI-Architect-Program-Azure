@@ -4,6 +4,7 @@ import asyncio
 import operator
 from typing import TypedDict, Annotated, List, Literal
 from datetime import datetime
+from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
 from langchain_openai import AzureOpenAIEmbeddings, AzureChatOpenAI
@@ -51,6 +52,19 @@ llm = AzureChatOpenAI(
 
 pc = Pinecone(api_key=PINECONE_API_KEY)
 INDEX_NAME = "assignment3-agentic-rag-kb"
+
+
+@asynccontextmanager
+async def mlflow_run_context(run_name: str, **params):
+    """Async context manager for MLflow runs with automatic cleanup"""
+    mlflow.start_run(run_name=run_name)
+    try:
+        # Log initial parameters
+        for key, value in params.items():
+            mlflow.log_param(key, value)
+        yield
+    finally:
+        mlflow.end_run()
 
 
 class AgentState(TypedDict):
@@ -412,49 +426,52 @@ def build_agentic_rag_graph():
 
 async def run_query(graph, question: str, run_id: str = None):
     """Execute query through agentic RAG graph"""
-    # Only start MLflow run if run_id is provided (for non-parallel execution)
+
+    async def _execute_query():
+        """Internal function to execute the query"""
+        initial_state = {
+            "messages": [],
+            "question": question,
+            "retrieved_docs": [],
+            "initial_answer": "",
+            "critique_decision": "",
+            "final_answer": "",
+            "retrieved_doc_ids": [],
+        }
+
+        result = await graph.ainvoke(initial_state)
+
+        print(f"\n{'='*80}")
+        print(f"Question: {question}")
+        print(f"Critique Decision: {result['critique_decision']}")
+        print(f"\nFinal Answer:\n{result['final_answer']}")
+        print("=" * 80)
+
+        return result
+
+    # Only use MLflow context if run_id is provided (for non-parallel execution)
     if run_id:
-        mlflow.start_run(run_name=f"query_{run_id}")
-        mlflow.log_param("question", question)
-        mlflow.log_param("timestamp", datetime.now().isoformat())
-
-    initial_state = {
-        "messages": [],
-        "question": question,
-        "retrieved_docs": [],
-        "initial_answer": "",
-        "critique_decision": "",
-        "final_answer": "",
-        "retrieved_doc_ids": [],
-    }
-
-    result = await graph.ainvoke(initial_state)
-
-    print(f"\n{'='*80}")
-    print(f"Question: {question}")
-    print(f"Critique Decision: {result['critique_decision']}")
-    print(f"\nFinal Answer:\n{result['final_answer']}")
-    print("=" * 80)
-
-    # Only end MLflow run if we started one
-    if run_id:
-        mlflow.end_run()
-
-    return result
+        async with mlflow_run_context(
+            run_name=f"query_{run_id}",
+            question=question,
+            timestamp=datetime.now().isoformat(),
+        ):
+            return await _execute_query()
+    else:
+        return await _execute_query()
 
 
 async def run_parallel_queries(graph, queries: List[str]):
-    """Execute multiple queries in parallel without individual MLflow runs"""
+    """Execute multiple queries in parallel with proper resource management"""
     print(f"Starting parallel execution of {len(queries)} queries...")
 
-    # Start a single MLflow run for all parallel queries
-    mlflow.start_run(run_name="parallel_queries_batch")
-    mlflow.log_param("total_queries", len(queries))
-    mlflow.log_param("queries", queries)
-    mlflow.log_param("execution_mode", "parallel")
-    mlflow.log_param("timestamp", datetime.now().isoformat())
-
-    try:
+    async with mlflow_run_context(
+        run_name="parallel_queries_batch",
+        total_queries=len(queries),
+        queries=queries,
+        execution_mode="parallel",
+        timestamp=datetime.now().isoformat(),
+    ):
         # Execute queries in parallel without individual MLflow runs
         tasks = [
             run_query(graph, query) for query in queries
@@ -482,9 +499,6 @@ async def run_parallel_queries(graph, queries: List[str]):
         print(
             f"\nParallel execution completed: {complete_count} complete, {refine_count} refined"
         )
-
-    finally:
-        mlflow.end_run()
 
     return results
 
@@ -521,6 +535,7 @@ async def main():
         "What are performance tuning tips?",
         "How do I version my APIs?",
         "What should I consider for error handling?",
+        "What is 24*7?",
     ]
 
     mlflow.set_experiment("rohit_mathur_assignment3")
