@@ -75,6 +75,8 @@ class AgentState(TypedDict):
     critique_decision: Literal["COMPLETE", "REFINE", ""]
     final_answer: str
     retrieved_doc_ids: List[str]
+    supervisor_decision: Literal["KB_SEARCH", "DIRECT_ANSWER", ""]
+    direct_answer: str
 
 
 async def load_and_index_kb(json_path: str):
@@ -208,6 +210,63 @@ async def retrieve_one_additional_document(question: str, exclude_ids: str) -> s
 # ============= AGENT NODES =============
 
 
+def create_supervisor_agent():
+    """Supervisor Agent: Decides whether to use KB search or answer directly"""
+    system_prompt = """You are a supervisor agent acting like an intelligent manager who decides how to handle user queries.
+
+Your expertise areas (available in knowledge base):
+- Software engineering best practices
+- DevOps and CI/CD pipelines  
+- Performance optimization
+- API design and versioning
+- Error handling strategies
+- Caching mechanisms
+- Database optimization
+- System architecture
+
+Your task:
+1. Analyze the user's question carefully
+2. Determine if the question requires specialized technical knowledge from your knowledge base
+3. Make a decision: KB_SEARCH or DIRECT_ANSWER
+
+Decision criteria:
+- KB_SEARCH: Question is about technical topics, best practices, specific implementations, or requires detailed domain expertise
+- DIRECT_ANSWER: Question is general knowledge, simple calculations, basic concepts, or outside your technical domains
+
+Examples:
+- "What are caching best practices?" → KB_SEARCH (technical expertise needed)
+- "How to set up CI/CD?" → KB_SEARCH (specialized knowledge)
+- "What is 2+2?" → DIRECT_ANSWER (simple calculation)
+- "What's the weather?" → DIRECT_ANSWER (outside technical domain)
+- "Tell me about Python" → DIRECT_ANSWER (general programming knowledge)
+
+Output: Respond with ONLY one decision: "KB_SEARCH" or "DIRECT_ANSWER"
+Do not provide explanations, just the decision."""
+
+    agent = create_react_agent(llm, tools=[], prompt=system_prompt)
+    return agent
+
+
+def create_direct_answer_agent():
+    """Direct Answer Agent: Provides direct answers for general queries"""
+    system_prompt = """You are a knowledgeable assistant providing direct answers to general queries.
+
+Your task:
+1. Answer the user's question directly using your general knowledge
+2. Be helpful, accurate, and concise
+3. If you're unsure about technical specifics, mention that specialized documentation might be needed
+4. Provide practical and actionable advice when possible
+
+Guidelines:
+- Be conversational but professional
+- Provide clear and well-structured responses
+- Include examples or explanations when helpful
+- If the question is outside your knowledge, be honest about limitations"""
+
+    agent = create_react_agent(llm, tools=[], prompt=system_prompt)
+    return agent
+
+
 def create_retriever_agent():
     """Retriever Agent: Fetches top-5 documents from KB"""
     system_prompt = """You are a retriever agent specialized in fetching relevant documents.
@@ -282,6 +341,47 @@ Be thorough and ensure the refined answer is complete."""
 
 
 # ============= GRAPH NODES =============
+
+
+async def supervisor_node(state: AgentState) -> AgentState:
+    """Supervisor node that decides routing strategy"""
+    agent = create_supervisor_agent()
+
+    messages = [
+        HumanMessage(
+            content=f"Analyze this question and decide routing: {state['question']}"
+        )
+    ]
+
+    result = await agent.ainvoke({"messages": messages})
+
+    decision = result["messages"][-1].content.strip().upper()
+
+    # Ensure valid decision
+    if decision not in ["KB_SEARCH", "DIRECT_ANSWER"]:
+        # Default to KB_SEARCH for technical-sounding queries
+        decision = "KB_SEARCH"
+
+    return {"messages": result["messages"], "supervisor_decision": decision}
+
+
+async def direct_answer_node(state: AgentState) -> AgentState:
+    """Direct answer node for general queries"""
+    agent = create_direct_answer_agent()
+
+    prompt = f"Question: {state['question']}\n\nProvide a helpful direct answer."
+
+    messages = state["messages"] + [HumanMessage(content=prompt)]
+
+    result = await agent.ainvoke({"messages": messages})
+
+    direct_answer = result["messages"][-1].content
+
+    return {
+        "messages": result["messages"],
+        "direct_answer": direct_answer,
+        "final_answer": direct_answer,
+    }
 
 
 async def retriever_node(state: AgentState) -> AgentState:
@@ -388,6 +488,13 @@ async def complete_node(state: AgentState) -> AgentState:
 # ============= ROUTING =============
 
 
+def route_after_supervisor(state: AgentState) -> Literal["direct_answer", "retriever"]:
+    """Route based on supervisor decision"""
+    if state["supervisor_decision"] == "DIRECT_ANSWER":
+        return "direct_answer"
+    return "retriever"
+
+
 def route_after_critique(state: AgentState) -> Literal["refinement", "complete"]:
     """Route based on critique decision"""
     if state["critique_decision"] == "REFINE":
@@ -399,16 +506,32 @@ def route_after_critique(state: AgentState) -> Literal["refinement", "complete"]
 
 
 def build_agentic_rag_graph():
-    """Build 4-agent autonomous RAG graph"""
+    """Build autonomous RAG graph with supervisor agent"""
     workflow = StateGraph(AgentState)
 
+    # Add all nodes
+    workflow.add_node("supervisor", supervisor_node)
+    workflow.add_node("direct_answer", direct_answer_node)
     workflow.add_node("retriever", retriever_node)
     workflow.add_node("answer", answer_node)
     workflow.add_node("critique", critique_node)
     workflow.add_node("refinement", refinement_node)
     workflow.add_node("complete", complete_node)
 
-    workflow.set_entry_point("retriever")
+    # Set supervisor as entry point
+    workflow.set_entry_point("supervisor")
+
+    # Route from supervisor
+    workflow.add_conditional_edges(
+        "supervisor",
+        route_after_supervisor,
+        {"direct_answer": "direct_answer", "retriever": "retriever"},
+    )
+
+    # Direct answer path ends immediately
+    workflow.add_edge("direct_answer", END)
+
+    # Knowledge base search path (existing flow)
     workflow.add_edge("retriever", "answer")
     workflow.add_edge("answer", "critique")
 
@@ -437,13 +560,16 @@ async def run_query(graph, question: str, run_id: str = None):
             "critique_decision": "",
             "final_answer": "",
             "retrieved_doc_ids": [],
+            "supervisor_decision": "",
+            "direct_answer": "",
         }
 
         result = await graph.ainvoke(initial_state)
 
         print(f"\n{'='*80}")
         print(f"Question: {question}")
-        print(f"Critique Decision: {result['critique_decision']}")
+        print(f"Supervisor Decision: {result.get('supervisor_decision', 'N/A')}")
+        print(f"Critique Decision: {result.get('critique_decision', 'N/A')}")
         print(f"\nFinal Answer:\n{result['final_answer']}")
         print("=" * 80)
 
@@ -479,49 +605,39 @@ async def run_parallel_queries(graph, queries: List[str]):
         results = await asyncio.gather(*tasks)
 
         # Log aggregate results
-        complete_count = sum(1 for r in results if r["critique_decision"] == "COMPLETE")
-        refine_count = sum(1 for r in results if r["critique_decision"] == "REFINE")
+        complete_count = sum(
+            1 for r in results if r.get("critique_decision") == "COMPLETE"
+        )
+        refine_count = sum(1 for r in results if r.get("critique_decision") == "REFINE")
+        direct_answer_count = sum(
+            1 for r in results if r.get("supervisor_decision") == "DIRECT_ANSWER"
+        )
+        kb_search_count = sum(
+            1 for r in results if r.get("supervisor_decision") == "KB_SEARCH"
+        )
 
         mlflow.log_param("complete_answers", complete_count)
         mlflow.log_param("refined_answers", refine_count)
+        mlflow.log_param("direct_answers", direct_answer_count)
+        mlflow.log_param("kb_searches", kb_search_count)
 
         # Log all final answers as a single artifact
         all_answers = {}
         for i, (query, result) in enumerate(zip(queries, results)):
             all_answers[f"query_{i+1}"] = {
                 "question": query,
-                "critique_decision": result["critique_decision"],
+                "supervisor_decision": result.get("supervisor_decision", "N/A"),
+                "critique_decision": result.get("critique_decision", "N/A"),
                 "final_answer": result["final_answer"],
             }
 
         mlflow.log_dict(all_answers, "all_parallel_results.json")
 
         print(
-            f"\nParallel execution completed: {complete_count} complete, {refine_count} refined"
+            f"\nParallel execution completed: {direct_answer_count} direct, {complete_count} complete, {refine_count} refined"
         )
 
     return results
-
-
-async def test_single_query():
-    """Test with a single query first"""
-    await load_and_index_kb("self_critique_loop_dataset.json")
-
-    graph = build_agentic_rag_graph()
-
-    # Set experiment first
-    mlflow.set_experiment("rohit_mathur_assignment3")
-
-    print("\n" + "=" * 80)
-    print("TESTING SINGLE QUERY")
-    print("=" * 80)
-
-    # Test single query with individual MLflow run
-    test_query = "What are best practices for caching?"
-    result = await run_query(graph, test_query, run_id="test_single")
-
-    print("\nTest completed successfully!")
-    print(f"Final answer preview: {result['final_answer'][:200]}...")
 
 
 async def main():
@@ -536,12 +652,16 @@ async def main():
         "How do I version my APIs?",
         "What should I consider for error handling?",
         "What is 24*7?",
+        "Tell me about Python programming language",
+        "What's the capital of France?",
+        "How to calculate compound interest?",
+        "What are microservices design patterns?",
     ]
 
     mlflow.set_experiment("rohit_mathur_assignment3")
 
     print("\n" + "=" * 80)
-    print("EXECUTING QUERIES IN PARALLEL WITH LANGGRAPH AGENTS")
+    print("EXECUTING QUERIES IN PARALLEL WITH AUTONOMOUS SUPERVISOR AGENT")
     print("=" * 80)
 
     await run_parallel_queries(graph, queries)
@@ -552,8 +672,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    # For testing, run single query first
-    # asyncio.run(test_single_query())
-
-    # For full execution, run main
     asyncio.run(main())
